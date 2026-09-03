@@ -3780,9 +3780,41 @@ impl Workspace {
         })
     }
 
+    /// Opens `paths`, prompting to save unsaved changes first if doing so would
+    /// replace the contents of the current window.
+    ///
+    /// When `open_mode` is not [`OpenMode::NewWindow`], opening can reuse (and
+    /// therefore discard) the workspace this window is currently showing, so the
+    /// request is routed through [`MultiWorkspace::open_project`], which runs
+    /// [`Workspace::prepare_to_close`] with [`CloseIntent::ReplaceWindow`] first.
     pub fn open_workspace_for_paths(
         &mut self,
-        // replace_current_window: bool,
+        open_mode: OpenMode,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<Workspace>>> {
+        if open_mode != OpenMode::NewWindow
+            && let Some(multi_workspace) = window.window_handle().downcast::<MultiWorkspace>()
+        {
+            return cx.spawn_in(window, async move |_, cx| {
+                multi_workspace
+                    .update(cx, |multi_workspace, window, cx| {
+                        multi_workspace.open_project(paths, open_mode, window, cx)
+                    })?
+                    .await
+            });
+        }
+
+        self.open_workspace_for_paths_without_prompting(open_mode, paths, window, cx)
+    }
+
+    /// Opens `paths` without prompting to save the current workspace's unsaved
+    /// changes. Only call this when the caller has already run
+    /// [`Workspace::prepare_to_close`], or when the current window cannot be
+    /// replaced (i.e. [`OpenMode::NewWindow`]).
+    pub(crate) fn open_workspace_for_paths_without_prompting(
+        &mut self,
         mut open_mode: OpenMode,
         paths: Vec<PathBuf>,
         window: &mut Window,

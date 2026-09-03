@@ -1644,3 +1644,125 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
         );
     });
 }
+
+// Regression test for https://github.com/zed-industries/zed/issues/55726.
+//
+// `Workspace::open_workspace_for_paths` is what the welcome page's recent-project
+// entries and the project panel's external-path drop handler call. When it is
+// allowed to reuse the current window it must go through
+// `MultiWorkspace::open_project` so that unsaved changes are prompted for,
+// rather than silently replacing the window's contents.
+#[gpui::test]
+async fn test_open_workspace_for_paths_prompts_before_replacing_dirty_workspace(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let app_state = cx.update(AppState::test);
+    let fs = app_state.fs.as_fake();
+    fs.insert_tree(path!("/project_a"), json!({ "file_a.txt": "" }))
+        .await;
+
+    // An empty (no-worktrees) workspace, as you get from the welcome page.
+    let project = Project::test(app_state.fs.clone(), [], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    cx.run_until_parked();
+
+    let empty_workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+    let dirty_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    empty_workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(dirty_item.clone()), None, true, window, cx);
+    });
+
+    let open_task = empty_workspace.update_in(cx, |workspace, window, cx| {
+        workspace.open_workspace_for_paths(
+            OpenMode::Activate,
+            vec![PathBuf::from(path!("/project_a"))],
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+
+    assert!(
+        cx.has_pending_prompt(),
+        "opening a folder into a window holding unsaved changes should prompt",
+    );
+
+    // Cancelling leaves the unsaved buffer alone.
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert_eq!(open_task.await.unwrap(), empty_workspace);
+    window
+        .read_with(cx, |mw, _cx| {
+            assert_eq!(mw.workspace(), &empty_workspace);
+        })
+        .unwrap();
+    assert!(dirty_item.read_with(cx, |item, cx| item.is_dirty(cx)));
+
+    // Discarding replaces the window with the requested project.
+    let open_task = empty_workspace.update_in(cx, |workspace, window, cx| {
+        workspace.open_workspace_for_paths(
+            OpenMode::Activate,
+            vec![PathBuf::from(path!("/project_a"))],
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("Don't Save");
+    cx.run_until_parked();
+
+    let workspace_a = open_task.await.unwrap();
+    assert_ne!(workspace_a, empty_workspace);
+    window
+        .read_with(cx, |mw, _cx| {
+            assert_eq!(mw.workspace(), &workspace_a);
+        })
+        .unwrap();
+}
+
+// `OpenMode::NewWindow` never replaces the current window, so it must not
+// prompt for the unsaved changes that stay behind in it.
+#[gpui::test]
+async fn test_open_workspace_for_paths_in_new_window_does_not_prompt(cx: &mut TestAppContext) {
+    init_test(cx);
+    let app_state = cx.update(AppState::test);
+    let fs = app_state.fs.as_fake();
+    fs.insert_tree(path!("/project_a"), json!({ "file_a.txt": "" }))
+        .await;
+
+    let project = Project::test(app_state.fs.clone(), [], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    cx.run_until_parked();
+
+    let empty_workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+    let dirty_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    empty_workspace.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(dirty_item.clone()), None, true, window, cx);
+    });
+
+    empty_workspace.update_in(cx, |workspace, window, cx| {
+        workspace
+            .open_workspace_for_paths(
+                OpenMode::NewWindow,
+                vec![PathBuf::from(path!("/project_a"))],
+                window,
+                cx,
+            )
+            .detach();
+    });
+    cx.run_until_parked();
+
+    assert!(!cx.has_pending_prompt());
+    assert!(dirty_item.read_with(cx, |item, cx| item.is_dirty(cx)));
+}

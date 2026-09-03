@@ -1981,7 +1981,9 @@ impl MultiWorkspace {
                 if should_continue {
                     workspace
                         .update_in(cx, |workspace, window, cx| {
-                            workspace.open_workspace_for_paths(open_mode, paths, window, cx)
+                            workspace.open_workspace_for_paths_without_prompting(
+                                open_mode, paths, window, cx,
+                            )
                         })?
                         .await
                 } else {
